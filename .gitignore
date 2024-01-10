@@ -1,3 +1,4 @@
 wandb/*
 budget_dyn_nn/*
 *.json
+__pycache__/*
