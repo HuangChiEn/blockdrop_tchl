@@ -4,7 +4,7 @@ from timm.data.transforms_factory import create_transform
 from tqdm import tqdm
 
 from models import get_model, Dynamic_ViT_backbone, Agent_wrapper
-from dynamic_budget import Dynamic_Budget_trainloop
+from blockdrop import BlockDrop_net
 from dataset import ImageNet_ds
 
 import pytorch_lightning as pl
@@ -24,7 +24,7 @@ def build_data_loader(val_ds_root, num_workers, batch_size, mod_cfg):
   img_ds.test_transform = create_transform(**mod_cfg)
   
   # for testing, apply all data in val_loader
-  img_ds.setup(stage='test') 
+  img_ds.setup(stage='test', subset_ratio=0.2) 
   tst_dataloader = img_ds.test_dataloader(batch_size=batch_size, shuffle=False, num_workers=num_workers)
   return tst_dataloader
 
@@ -34,20 +34,26 @@ def main(cfger):
 
   tst_ld = build_data_loader(**cfger.data_params, mod_cfg=mod_cfg)
   
-  PATH = "/content/proj/budget_dyn_nn/27nmp9oj/checkpoints/epoch=3-step=292.ckpt"
+  PATH = "/content/proj/budget_dyn_nn/5hujrsai/checkpoints/epoch=9-step=520.ckpt"
 
-  ba_dnn = Dynamic_Budget_trainloop.load_from_checkpoint(PATH)
+  ba_dnn = BlockDrop_net.load_from_checkpoint(PATH, dyn_bkn=dyn_model, agent=agent, **cfger.train_params)
   trainer = pl.Trainer(**cfger.trainer)
+
+  # call test_step(.) isolated
   trainer.test(ba_dnn, dataloaders=tst_ld)
 
 
 def get_config():
   return '''
+  [train_params]
+    lr = 1e-3
+    penalty = -1.0
+    bound_alpha = 0.8
+
   [model_params]
     model_type = 'vit_base_patch8_224'
     agent_type = 'resnet18'
-    #blk_budget = 6
-  
+    
   [data_params]
     # root for colab setup!
     val_ds_root = '/content/imagenette2/val'
@@ -55,10 +61,7 @@ def get_config():
     batch_size = 1 
 
   [trainer]
-    accelerator = 'cpu'
-    max_epochs = 2
-    # debug for tra/val loop via fast testing!
-    fast_dev_run = False
+    accelerator = 'gpu'
   
   [logger]
     log_type = 'wandb'

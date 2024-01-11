@@ -9,21 +9,40 @@ from models import get_model
 import pytorch_lightning as pl
 from torch.distributions import Bernoulli
 
-# Implement training framework
-class Dynamic_Budget_trainloop(pl.LightningModule):
+# Implement training / finetuning / infer framework
+class BlockDrop_net(pl.LightningModule):
   
-  def __init__(self, dyn_bkn, agent, beg_cl_step=1):
+  def __init__(self, 
+    dyn_bkn, 
+    agent, 
+    bound_alpha, 
+    penalty, 
+    lr,
+    beg_cl_step=1,
+    beta=0
+  ):
     super().__init__()
     self.dyn_bkn = dyn_bkn
     self.agent = agent
-    self.bound_alpha = 0.8
-    self.penalty = -1.0
-    self.beta = 1e-1
+    self.bound_alpha = bound_alpha
+    self.penalty = penalty
+    self.beta = beta
+    self.lr = lr
     self.cl_step = beg_cl_step
     self.test_out = []
 
     self.loss_fn = torch.nn.CrossEntropyLoss()
-    self.loss_lst, self.top1_lst, self.top5_lst = [], [], []
+    self._stage_flag = 'train'
+
+  @property
+  def exe_stage(self):
+    return self._stage_flag
+
+  @exe_stage.setter
+  def exe_stage(self, stage_flag):
+    if stage_flag not in ['train', 'finetune']:
+      raise RuntimeError("Execution stage should be 'train' or 'finetune'")
+    self._stage_flag = stage_flag
 
   # key design : 
   #   1. min block usage
@@ -52,9 +71,8 @@ class Dynamic_Budget_trainloop(pl.LightningModule):
     return perf_dict
 
   def training_step(self, batch, batch_index):
-    loss_dict = {}
     im, lab, _ = batch
-
+    
     # one-step MDP, classification env is simple..
     # predict selected block for each img, [bz, n_blk]
     select_pred = self.agent(im)
@@ -70,7 +88,8 @@ class Dynamic_Budget_trainloop(pl.LightningModule):
     select_pred = distr.sample()
 
     # release constraint by curriculum-training
-    if self.cl_step < self.dyn_bkn.n_blk:
+    # disabled in finetuning..
+    if self._stage_flag == 'train' and self.cl_step < self.dyn_bkn.n_blk:
       base_select_pred[:, :-self.cl_step] = 1
       select_pred[:, :-self.cl_step] = 1
       policy_mask = torch.ones_like(select_pred)
@@ -95,18 +114,32 @@ class Dynamic_Budget_trainloop(pl.LightningModule):
       rl_loss = (policy_mask * rl_loss).sum()
     else:
       rl_loss = rl_loss.sum()
-    loss_dict['train/rl_loss'] = rl_loss
-    
-    # maximum search space of drop block actions
-    probs = bound_prob.clamp(1e-15, 1-1e-15)
-    entropy_loss = ( -probs*torch.log(probs) ).sum()
-    loss_dict['train/entropy_loss'] = entropy_loss
 
-    total_loss = (rl_loss - (self.beta * entropy_loss)) / im.shape[0]
-    loss_dict['train/total_loss'] = total_loss
+    loss_dict = {}
+    loss_dict['train/rl_loss'] = rl_loss
+
+    total_loss = 0
+    bz = im.shape[0]
+    if self._stage_flag == 'train':
+      # maximum search space of drop block actions
+      probs = bound_prob.clamp(1e-15, 1-1e-15)
+      entropy_loss = ( -probs*torch.log(probs) ).sum()
+      loss_dict[f'{self._stage_flag}/entropy_loss'] = entropy_loss
+      # negative term for minimized entropy
+      total_loss = (rl_loss - (self.beta * entropy_loss)) / bz
+    else:
+      ce_loss = loss_dict[f'{self._stage_flag}/cross_entropy_loss'] = self.loss_fn(pred, lab)
+      total_loss = (rl_loss / bz) + ce_loss
+
+    loss_dict[f'{self._stage_flag}/total_loss'] = total_loss
 
     # since we use 'threshold' in inference phase, so we measure base_*
-    perf_dict = self.pref_status('train', base_select_pred, base_reward, matched)
+    perf_dict = self.pref_status(
+      self._stage_flag, 
+      base_select_pred, 
+      base_reward, 
+      matched
+    )
     loss_dict.update(perf_dict)
     self.log_dict(loss_dict, on_step=True, prog_bar=True)
 
@@ -126,7 +159,7 @@ class Dynamic_Budget_trainloop(pl.LightningModule):
     # make base prediction with simple threshold
     base_select_pred[base_select_pred<0.5] = 0.0
     base_select_pred[base_select_pred>=0.5] = 1.0
-    if self.cl_step < self.dyn_bkn.n_blk:
+    if self._stage_flag == 'train' and self.cl_step < self.dyn_bkn.n_blk:
       base_select_pred[:, :-self.cl_step] = 1
 
     pred = self.dyn_bkn(im, base_select_pred)
@@ -149,34 +182,33 @@ class Dynamic_Budget_trainloop(pl.LightningModule):
     drop_pred[drop_pred<0.5] = 0.0
     drop_pred[drop_pred>=0.5] = 1.0
 
-    pred = self.dyn_bkn(im, drop_pred, bin_path=True)
-    g_flops = 0 * 1e-9
+    pred, flops = self.dyn_bkn(im, drop_pred, bin_path=True, cal_flops=True)
+    g_flops = flops * 1e-9
 
     _, pred_idx = pred.max(1)
     matched = (pred_idx==lab)
-    acc = matched.float().mean()
+    acc = matched.float()
     
     # if num of test data can't divided by batch size,
     #   this method will take weighted accuracy
-    self.log('test_acc', acc, batch_size=1)
-    print(acc)
-    '''
+    #self.log('test_acc', acc, batch_size=1)
+    
     self.log_dict(
       {'test_acc': acc, 'Gflops': g_flops},
       on_step=True,
       on_epoch=True,
       prog_bar=True
     )
-    '''
+    
 
   def configure_optimizers(self):
-    optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.3, verbose=True)
     return {
         "optimizer": optimizer,
         "lr_scheduler": {
             "scheduler": scheduler,
-            "monitor": "train/total_loss",
+            "monitor": f"{self._stage_flag}/total_loss",
             'interval': 'epoch',
             "frequency": 1
         },
