@@ -2,3 +2,4 @@ wandb/*
 budget_dyn_nn/*
 *.json
 __pycache__/*
+lightning_logs/*

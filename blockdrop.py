@@ -19,28 +19,45 @@ class BlockDrop_net(pl.LightningModule):
     penalty, 
     lr,
     beg_cl_step=1,
-    beta=0
+    beta=0,
+    stage_flag='train'
   ):
+    def setup_net_status(dyn_bkn, agent, stage_flag):
+      if stage_flag == 'train':
+        dyn_bkn.eval().freeze()
+        agent.train()
+      elif stage_flag == 'finetune':
+        dyn_bkn.train()
+        agent.train()
+      else: # test mode, doesn't have optimizer, no need freeze(.)
+        dyn_bkn.eval()
+        agent.eval()
+      return dyn_bkn, agent
+
     super().__init__()
-    self.dyn_bkn = dyn_bkn
-    self.agent = agent
-    self.bound_alpha = bound_alpha
-    self.penalty = penalty
-    self.beta = beta
-    self.lr = lr
-    self.cl_step = beg_cl_step
-    self.test_out = []
+    if stage_flag not in ['train', 'finetune', 'test']:
+      raise RuntimeError("Execution stage should be 'train' or 'finetune'")
+    self._stage_flag = stage_flag
+    
+    self.dyn_bkn, self.agent = setup_net_status(dyn_bkn, agent, stage_flag)
 
-    self.loss_fn = torch.nn.CrossEntropyLoss()
-    self._stage_flag = 'train'
-
+    if self._stage_flag == 'test':
+      self.setup_test_args()
+    else:
+      self.bound_alpha = bound_alpha
+      self.penalty = penalty
+      self.beta = beta
+      self.lr = lr
+      self.cl_step = beg_cl_step
+      self.loss_fn = torch.nn.CrossEntropyLoss()
+    
   @property
   def exe_stage(self):
     return self._stage_flag
 
   @exe_stage.setter
   def exe_stage(self, stage_flag):
-    if stage_flag not in ['train', 'finetune']:
+    if stage_flag not in ['train', 'finetune', 'test']:
       raise RuntimeError("Execution stage should be 'train' or 'finetune'")
     self._stage_flag = stage_flag
 
@@ -116,7 +133,7 @@ class BlockDrop_net(pl.LightningModule):
       rl_loss = rl_loss.sum()
 
     loss_dict = {}
-    loss_dict['train/rl_loss'] = rl_loss
+    loss_dict[f'{self._stage_flag}/rl_loss'] = rl_loss
 
     total_loss = 0
     bz = im.shape[0]
@@ -168,6 +185,10 @@ class BlockDrop_net(pl.LightningModule):
     perf_dict = self.pref_status('valid', base_select_pred, reward, matched)
     self.log_dict(perf_dict, prog_bar=True)
 
+  def setup_test_args(self, cal_flops=True, benchmark=False):
+    self.cal_flops = cal_flops
+    self.benchmark = benchmark
+
   # called by Trainer.test(.), agnoistic with train_step..
   def test_step(self, batch, batch_idx):
     loss_dict = {}
@@ -182,16 +203,16 @@ class BlockDrop_net(pl.LightningModule):
     drop_pred[drop_pred<0.5] = 0.0
     drop_pred[drop_pred>=0.5] = 1.0
 
-    pred, flops = self.dyn_bkn(im, drop_pred, bin_path=True, cal_flops=True)
+    pred, flops = self.dyn_bkn(
+      im, drop_pred, bin_path=True, 
+      cal_flops=self.cal_flops, 
+      benchmark=self.benchmark
+    )
     g_flops = flops * 1e-9
 
     _, pred_idx = pred.max(1)
     matched = (pred_idx==lab)
     acc = matched.float()
-    
-    # if num of test data can't divided by batch size,
-    #   this method will take weighted accuracy
-    #self.log('test_acc', acc, batch_size=1)
     
     self.log_dict(
       {'test_acc': acc, 'Gflops': g_flops},
@@ -199,18 +220,11 @@ class BlockDrop_net(pl.LightningModule):
       on_epoch=True,
       prog_bar=True
     )
-    
+  
 
   def configure_optimizers(self):
     optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.3, verbose=True)
-    return {
-        "optimizer": optimizer,
-        "lr_scheduler": {
-            "scheduler": scheduler,
-            "monitor": f"{self._stage_flag}/total_loss",
-            'interval': 'epoch',
-            "frequency": 1
-        },
-    }
+    # https://github.com/Tushar-N/blockdrop/blob/ec52b36d38dc21335df539ac24e51462c6012b5c/utils.py#L39C9-L39C9
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+    return [optimizer], [scheduler]
   
