@@ -47,18 +47,18 @@ def main(cfger):
   
   trainer = pl.Trainer(**cfger.trainer, logger=logger, callbacks=[lr_monitor])
   if cfger.exe_stage == 'train':
-    ba_dnn = BlockDrop_net(dyn_bkn=dyn_model, agent=agent, **cfger.train_params)
+    ba_dnn = BlockDrop_net(dyn_bkn=dyn_model, agent=agent, stage_flag=cfger.exe_stage, **cfger.train_params)
     trainer.fit(ba_dnn, tra_ld, val_ld)
   elif cfger.exe_stage == 'finetune':
     ba_dnn = BlockDrop_net.load_from_checkpoint(
       cfger.finetune_params['PATH'], dyn_bkn=dyn_model, agent=agent,
-      **cfger.finetune_params 
+      stage_flag=cfger.exe_stage, **cfger.finetune_params 
     )
     trainer.fit(ba_dnn, tra_ld, val_ld)
   else:
     ba_dnn = BlockDrop_net.load_from_checkpoint(
       cfger.test_params['PATH'], dyn_bkn=dyn_model, agent=agent,
-      **cfger.train_params # dummy input..
+      stage_flag=cfger.exe_stage, **cfger.train_params # dummy input..
     )
     ba_dnn.setup_test_args(**cfger.test_args)
     tst_ld = val_ld # valid set is just test set with more sample
@@ -73,7 +73,6 @@ def get_config():
   exp_id = '002'
 
   [train_params]
-    stage_flag = $exe_stage
     lr = 7e-4
     beta = 5e-2
     # for training only

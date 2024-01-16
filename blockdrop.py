@@ -27,7 +27,7 @@ class BlockDrop_net(pl.LightningModule):
         dyn_bkn.eval().freeze()
         agent.train()
       elif stage_flag == 'finetune':
-        dyn_bkn.train()
+        dyn_bkn.train().non_freeze() 
         agent.train()
       else: # test mode, doesn't have optimizer, no need freeze(.)
         dyn_bkn.eval()

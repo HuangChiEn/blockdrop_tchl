@@ -42,6 +42,13 @@ class Dynamic_ViT_backbone(nn.Module):
     # update module block list for sure 
     self.mod_blk_lst = self.base_model.blocks
 
+  def non_freeze(self):
+    # freeze weight
+    for param in self.base_model.parameters():
+      param.requires_grad = True
+    # update module block list for sure 
+    self.mod_blk_lst = self.base_model.blocks
+
   @property
   def n_blk(self):
     return len(self.mod_blk_lst)
