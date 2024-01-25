@@ -1,5 +1,4 @@
 from torchvision import models
-from torchsummary import summary
 from torch import nn
 import torch
 import random
@@ -89,7 +88,7 @@ class BlockDrop_net(pl.LightningModule):
 
   def training_step(self, batch, batch_index):
     im, lab, _ = batch
-    
+
     # one-step MDP, classification env is simple..
     # predict selected block for each img, [bz, n_blk]
     select_pred = self.agent(im)
@@ -117,7 +116,7 @@ class BlockDrop_net(pl.LightningModule):
     # training bottleneck comes from go though self.dyn_bkn twice (timeit)
     base_pred = self.dyn_bkn(im, base_select_pred)
     base_reward, matched = self.get_reward(base_pred, lab, base_select_pred)
-    
+
     pred = self.dyn_bkn(im, select_pred)
     reward, _ = self.get_reward(pred, lab, select_pred)
     
@@ -223,6 +222,8 @@ class BlockDrop_net(pl.LightningModule):
   
 
   def configure_optimizers(self):
+    # sinec we apply the identical opt for traing & joint tuning
+    #  we explicitly set grad in __init__ & include all params in here even 'it will not be updated'!
     optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
     # https://github.com/Tushar-N/blockdrop/blob/ec52b36d38dc21335df539ac24e51462c6012b5c/utils.py#L39C9-L39C9
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)

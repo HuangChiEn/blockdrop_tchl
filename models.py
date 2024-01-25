@@ -133,6 +133,7 @@ class Dynamic_Resnet_backbone(nn.Module):
         if lay_name not in named_dict.keys():
           raise RuntimeError(f"Missing pretrained model layer {lay_name}")
         mod_blk_lst.append( named_dict[lay_name] )
+      
       return mod_blk_lst
 
     super().__init__()
@@ -141,11 +142,16 @@ class Dynamic_Resnet_backbone(nn.Module):
     self.base_model = base_model
 
     # layer cfg record num of sub-layer for each layer in resnet 
+    resnet_cfg = [3, 4, 23, 3]
     self.id2lay = { idx:f'layer1.{idx}' for idx in range(0, resnet_cfg[0]) }
+    
+    cnt = 0
+    k = 2
     for cfg_id, lay_rng in enumerate(resnet_cfg[1:], 0):
-      self.id2lay.update( { resnet_cfg[cfg_id]+idx:f'layer2.{idx}' for idx in range(0, lay_rng) } )
-      cnt += resnet_cfg[cfg_id]
-
+        self.id2lay.update( { cnt+resnet_cfg[cfg_id]+idx:f'layer{k}.{idx}' for idx in range(0, lay_rng) } )
+        cnt += resnet_cfg[cfg_id]
+        k+=1
+    
     # we only extract the layer-level content from resnet
     #  note :  self.mod_blk_lst share same id with self.base_model!
     self.mod_blk_lst = create_blk_lst(self.base_model)
@@ -187,6 +193,9 @@ class Dynamic_Resnet_backbone(nn.Module):
         
         select_blk_idx = select_indicator[:, blk_id].nonzero()
         msk[select_blk_idx] = 1.0 
+        
+        ds_blk = getattr(block, 'downsample', None)
+        prev_inp = ds_blk(prev_inp) if ds_blk else prev_inp
         inp = out * msk + prev_inp * (1-msk)
         
       return self._forward_head(inp)
@@ -218,16 +227,18 @@ class Dynamic_Resnet_backbone(nn.Module):
 
 class Agent_wrapper(nn.Module):
   
-  def __init__(self, base_model):
+  def __init__(self, base_model, num_blocks):
     super().__init__()
     self.base_model = base_model
+    self.logit = nn.Linear(base_model.fc.in_features, num_blocks)
+    self.base_model.fc = nn.Identity()
     
   def forward(self, inp):
-    # load pretrain model with n_cls=n_blk
-    #   let it output correct shape 
-    out_logit = self.base_model(inp) 
+    # dropblk downsample first..
+    x = F.avg_pool2d(inp, 2)
+    feat = self.base_model(x) 
     # turn logit to prob
-    return torch.sigmoid(out_logit)
+    return torch.sigmoid(self.logit(feat))
 
 
 # For testing the correctness of dynamic ViT
